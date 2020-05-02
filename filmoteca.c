@@ -202,8 +202,7 @@ char portalextra[] = "</td>\n"
 	"\t<tr>\n"
 	"\t\t<td>Extras</td><td>";
 char portalfeet[] = "</td>\n\t</tr>\n</table>\n</center></body>\n</html>\n";
-char stylepath[] = "/home/cinema/lib/film/style.css";
-char fvicopath[] = "/home/cinema/lib/film/favicon.ico";
+char *assetpath = "/home/cinema/lib/film";
 char *wdir = "/home/cinema/films";
 Req *req;
 Res *res;
@@ -283,20 +282,25 @@ stringcmp(const void *a, const void *b)
 	return strcmp(*sa, *sb);
 }
 
-int
+static int
 urldecode(char *url, char *out, long n)
 {
 	char *o, *ep;
+	char xnum[3];
 	int c;
 
+	xnum[2] = 0;
 	ep = url+n;
 	for(o = out; url <= ep; o++){
 		c = *url++;
-		if(c == '%' &&
-		   (!isxdigit(*url++) ||
-		    !isxdigit(*url++) ||
-		    !sscanf(url-2, "%2x", &c)))
-			return -1;
+		if(c == '%'){
+			xnum[0] = url[0];
+			xnum[1] = url[1];
+			url += 2;
+			if(!isxdigit(xnum[0]) || !isxdigit(xnum[1]))
+				return -1;
+			c = strtol(xnum, nil, 16);
+		}
 		*o = c;
 	}
 	return o - out;
@@ -367,10 +371,6 @@ insertepisode(Season *s, Episode *e, int no)
 	Episode *ep, *olde;
 
 	olde = nil;
-	if(s->pilot == nil){
-		s->pilot = e;
-		return;
-	}
 	for(ep = s->pilot; ep != nil && ep->no < e->no; olde = ep, ep = ep->next)
 		;
 	if(olde == nil)
@@ -1076,7 +1076,7 @@ char *argv0;
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-d wdir]\n", argv0);
+	fprintf(stderr, "usage: %s [-d wdir] [-a assetsdir]\n", argv0);
 	exit(1);
 }
 
@@ -1091,18 +1091,22 @@ main(int argc, char *argv[])
 	case 'd':
 		wdir = EARGF(usage());
 		break;
+	case 'a':
+		assetpath = EARGF(usage());
+		break;
 	default: usage();
 	}ARGEND;
 	memset(path, 0, sizeof path);
 	hparsereq();
 	if(strcmp(req->method, "GET") != 0 && strcmp(req->method, "HEAD") != 0)
 		hfail(Snotimple);
-	if(strcmp(req->version, httpver) != 0)
+	/* "HTTP/1." */
+	if(strncmp(req->version, httpver, 7) != 0)
 		hfail(Swrongver);
 	if(strcmp(req->target, "/style") == 0)
-		strncpy(path, stylepath, sizeof(path)-1);
+		snprintf(path, sizeof path, "%s/%s", assetpath, "style.css");
 	else if(strcmp(req->target, "/favicon.ico") == 0)
-		strncpy(path, fvicopath, sizeof(path)-1);
+		snprintf(path, sizeof path, "%s/%s", assetpath, "favicon.ico");
 	else
 		snprintf(path, sizeof path, "%s%s", wdir, req->target);
 	if(urldecode(path, path, strlen(path)) < 0)
