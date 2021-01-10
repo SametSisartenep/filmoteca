@@ -1026,7 +1026,7 @@ tmain(void *a)
 void
 usage(void)
 {
-	fprint(2, "usage: %s [-D] [-d wdir] [-a assetsdir] [-p port] [-u user] [-g group]\n", argv0);
+	fprint(2, "usage: %s [-D] [-d wdir] [-a assetsdir] [-p port] [-u user]\n", argv0);
 	exit(1);
 }
 
