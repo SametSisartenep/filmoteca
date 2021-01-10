@@ -1,2 +1,2 @@
 #!/bin/sh
-/home/cinema/bin/filmoteca -d /filmoteca 2>>/home/cinema/lib/film/filmoteca.log
+/home/cinema/bin/filmoteca -p 80 -u cinema 2>>/home/cinema/lib/film/filmoteca.log

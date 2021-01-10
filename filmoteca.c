@@ -12,14 +12,13 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
-#include "libutf/utf.h"
+#include <pwd.h>
+#include <pthread.h>
+#include <utf.h>
+#include <fmt.h>
+#include "dat.h"
+#include "fns.h"
 #include "args.h"
-
-#define nil NULL
-typedef unsigned int uint;
-typedef unsigned long ulong;
-typedef long long vlong;
-typedef unsigned long long uvlong;
 
 enum {
 	Sok		= 200,
@@ -42,113 +41,6 @@ char *statusmsg[] = {
  [Sinternal]	"Internal Server Error",
  [Snotimple]	"Not Implemented",
  [Swrongver]	"HTTP Version Not Supported",
-};
-
-typedef struct Movie Movie;
-typedef struct Multipart Multipart;
-typedef struct Part Part;
-typedef struct Series Series;
-typedef struct Season Season;
-typedef struct Episode Episode;
-typedef struct Resource Resource;
-
-struct Movie {
-	char *release;		/* release date */
-	int hassynopsis;	/* is there a synopsis, */
-	int hascover;		/* cover, */
-	int hasvideo;		/* video, */
-	int hashistory;		/* or history file? */
-	char **subs;		/* list of subtitle languages */
-	int nsub;
-	char **dubs;		/* list of revoicing languages */
-	int ndub;
-	char **extras;		/* list of extra content */
-	int nextra;
-	char **remakes;		/* list of remake years */
-	int nremake;
-};
-
-struct Multipart {
-	char *release;		/* release date */
-	int hassynopsis;	/* is there a synopsis, */
-	int hascover;		/* cover, */
-	int hashistory;		/* or history file? */
-	Part *part0;		/* list of parts */
-	char **extras;		/* list of extra content */
-	int nextra;
-	char **remakes;		/* list of remake years */
-	int nremake;
-};
-
-struct Part {
-	int no;			/* part number */
-	char **subs;		/* list of subtitle languages */
-	int nsub;
-	char **dubs;		/* list of revoicing languages */
-	int ndub;
-	Part *next;
-};
-
-struct Series {
-	int hassynopsis;	/* is there a synopsis, */
-	int hascover;		/* cover, */
-	int hashistory;		/* or history file? */
-	Season *s;		/* list of seasons */
-	char **extras;		/* list of extra content */
-	int nextra;
-	char **remakes;		/* list of remake years */
-	int nremake;
-};
-
-struct Season {
-	char *release;		/* release date */
-	int no;			/* season number */
-	Episode *pilot;		/* list of episodes */
-	Season *next;
-};
-
-struct Episode {
-	int no;			/* episode number */
-	int hasvideo;		/* is there a video file? */
-	char **subs;		/* list of subtitle languages */
-	int nsub;
-	char **dubs;		/* list of revoicing languages */
-	int ndub;
-	Episode *next;
-};
-
-enum {
-	Rmovie,
-	Rmulti,
-	Rserie,
-	Runknown
-};
-struct Resource {
-	int type;
-	union {
-		Movie movie;
-		Multipart multi;
-		Series serie;
-	};
-};
-
-typedef struct Req Req;
-typedef struct Res Res;
-typedef struct HField HField;
-
-struct Req {
-	char *method, *target, *version;
-	HField *fields;
-};
-
-struct Res {
-	int status;
-	HField *fields;
-};
-
-struct HField {
-	char *key, *value;
-	HField *next;
 };
 
 char httpver[] = "HTTP/1.1";
@@ -203,42 +95,14 @@ char portalextra[] = "</td>\n"
 	"\t\t<td>Extras</td><td>";
 char portalfeet[] = "</td>\n\t</tr>\n</table>\n</center></body>\n</html>\n";
 char *assetpath = "/home/cinema/lib/film";
-char *wdir = "/home/cinema/films";
-Req *req;
-Res *res;
+char *wdir = "/filmoteca";
+int lfd, ncpu;
+pthread_t *threads;
+pthread_mutex_t attendlock;
 
-void hfatal(char *);
+int debug;
+char *argv0;
 
-/* a crappy mimic of the original */
-void
-sysfatal(char *s)
-{
-	perror(s);
-	exit(1);
-}
-
-void *
-emalloc(ulong n)
-{
-	void *p;
-
-	p = malloc(n);
-	if(p == nil)
-		hfatal("malloc");
-	memset(p, 0, n);
-	return p;
-}
-
-void *
-erealloc(void *ptr, ulong n)
-{
-	void *p;
-
-	p = realloc(ptr, n);
-	if(p == nil)
-		hfatal("realloc");
-	return p;
-}
 
 long
 truestrlen(char *s)
@@ -335,9 +199,6 @@ mimetype(int fd, char *mime, long len)
 		if((n = read(pf[0], m, sizeof(m)-1)) < 0)
 			return -1;
 		close(pf[0]);
-		/* file(1) is not that good at guessing. */
-		if(strcmp(req->target, "/style") == 0)
-			strncpy(m, "text/css; charset=utf-8", sizeof(m)-1);
 		if(strncmp(m, "audio", 5) == 0)
 			strncpy(m, "video", 5);
 		strncpy(mime, m, len);
@@ -394,73 +255,63 @@ allochdr(char *k, char *v)
 void
 freehdr(HField *h)
 {
-	HField *hn;
-
-	while(h != nil){
-		hn = h->next;
-		free(h->value);
-		free(h->key);
-		free(h);
-		h = hn;
-	}
+	free(h->value);
+	free(h->key);
+	free(h);
 }
 
 void
-inserthdr(HField **h, char *k, char *v)
+inserthdr(Req *r, char *k, char *v)
 {
-	while(*h != nil)
-		h = &(*h)->next;
-	*h = allochdr(k, v);
+	HField *h;
+
+	if(r->headers == nil){
+		r->headers = allochdr(k, v);
+		return;
+	}
+	for(h = r->headers; h->next != nil; h = h->next)
+		;
+	h->next = allochdr(k, v);
 }
 
 char *
-lookuphdr(HField *h, char *k)
+lookuphdr(Req *r, char *k)
 {
-	while(h != nil){
+	HField *h;
+
+	for(h = r->headers; h != nil; h = h->next)
 		if(strcmp(h->key, k) == 0)
 			return h->value;
-		h = h->next;
-	}
 	return nil;
 }
 
 Req *
-allocreq(char *meth, char *targ, char *vers)
+allocreq(char *meth, char *targ, char *vers, int sc)
 {
 	Req *r;
 
 	r = emalloc(sizeof(Req));
-	r->method = strdup(meth);
-	r->target = strdup(targ);
-	r->version = strdup(vers);
+	r->method = meth != nil? strdup(meth): nil;
+	r->target = targ != nil? strdup(targ): nil;
+	r->version = vers != nil? strdup(vers): strdup(httpver);
+	r->status = sc;
+	r->headers = nil;
+	inserthdr(r, "Server", srvname);
 	return r;
 }
 
 void
 freereq(Req *r)
 {
-	freehdr(r->fields);
+	HField *h, *hn;
+
+	for(h = r->headers; h != nil; h = hn){
+		hn = h->next;
+		freehdr(h);
+	}
 	free(r->version);
 	free(r->target);
 	free(r->method);
-	free(r);
-}
-
-Res *
-allocres(int sc)
-{
-	Res *r;
-
-	r = emalloc(sizeof(Res));
-	r->status = sc;
-	inserthdr(&r->fields, "Server", srvname);
-	return r;
-}
-
-void
-freeres(Res *r)
-{
-	freehdr(r->fields);
 	free(r);
 }
 
@@ -477,90 +328,93 @@ hprint(char *fmt, ...)
 	return rc;
 }
 
-void
-hstline(int sc)
+int
+hprintst(Req *r)
 {
-	hprint("%s %d %s", httpver, sc, statusmsg[sc]);
+	return hprint("%s %d %s", r->version, r->status, statusmsg[r->status]);
 }
 
-void
-hprinthdr(void)
+int
+hprinthdr(Req *r)
 {
-	HField *hp;
+	HField *h;
+	int rc;
 
-	hstline(res->status);
-	for(hp = res->fields; hp != nil; hp = hp->next)
-		hprint("%s: %s", hp->key, hp->value);
-	hprint("");
+	rc = hprintst(r);
+	for(h = r->headers; h != nil; h = h->next)
+		rc += hprint("%s: %s", h->key, h->value);
+	rc += hprint("");
 	fflush(stdout);
+	return rc;
 }
 
 void
 hfail(int sc)
 {
+	Req *res;
 	char clen[16];
 
-	res = allocres(sc);
-	snprintf(clen, sizeof clen, "%u", strlen(errmsg));
-	inserthdr(&res->fields, "Content-Type", "text/plain; charset=utf-8");
-	inserthdr(&res->fields, "Content-Length", clen);
-	hprinthdr();
+	res = allocreq(nil, nil, nil, sc);
+	snprint(clen, sizeof clen, "%u", strlen(errmsg));
+	inserthdr(res, "Content-Type", "text/plain; charset=utf-8");
+	inserthdr(res, "Content-Length", clen);
+	hprinthdr(res);
+	freereq(res);
 	hprint("%s", errmsg);
 	hprint("");
-	exit(0);
+	exit(1);
 }
 
-void
-hfatal(char *ctx)
-{
-	hstline(Sinternal);
-	hprint("Content-Type: %s", "text/plain; charset=utf-8");
-	hprint("Content-Length: %u", strlen(errmsg));
-	hprint("");
-	hprint("%s", errmsg);
-	hprint("");
-	fflush(stdout);
-	sysfatal(ctx);
-}
-
-void
+Req *
 hparsereq(void)
 {
-	char *line, *meth, *targ, *vers, *k, *v;
-	uint linelen;
+	Req *req;
+	char *line, *linep, *meth, *targ, *vers, *k, *v;
+	ulong linelen;
 	int n;
 
+	line = nil;
+	linelen = 0;
 	n = getline(&line, &linelen, stdin);
-	meth = strtok(line, " ");
-	targ = strtok(nil, " ");
-	vers = strtok(nil, " \r");
+	meth = strtok_r(line, " ", &linep);
+	targ = strtok_r(nil, " ", &linep);
+	vers = strtok_r(nil, " \r", &linep);
 	if(meth == nil || targ == nil || vers == nil)
 		hfail(Sbadreq);
+
 	if(targ[strlen(targ)-1] == '/')
 		targ[strlen(targ)-1] = 0;
-	req = allocreq(meth, targ, vers);
+
+	req = allocreq(meth, targ, vers, 0);
+
 	while((n = getline(&line, &linelen, stdin)) > 0){
 		if(strcmp(line, "\r\n") == 0)
 			break;
-		k = strtok(line, ": ");
-		v = strtok(nil, " \r");
+		k = strtok_r(line, ": ", &linep);
+		v = strtok_r(nil, " \r", &linep);
 		if(k == nil || v == nil)
 			hfail(Sbadreq);
-		inserthdr(&req->fields, k, v);
+		inserthdr(req, k, v);
 	}
+	free(line);
+
+	return req;
 }
 
 void
-sendfile(FILE *f, struct stat *fst)
+sendfile(Req *req, FILE *f, struct stat *fst)
 {
+	Req *res;
 	char buf[128*1024], mime[256], *s, crstr[6+3*16+1+1+1], clstr[16];
 	uvlong brange[2], n, clen;
 
 	n = clen = 0;
-	if(mimetype(fileno(f), mime, sizeof mime) < 0)
-		hfatal("sendfile: mimetype");
+	if(strcmp(req->target, "/style") == 0)
+		strncpy(mime, "text/css; charset=utf-8", sizeof mime);
+	else if(mimetype(fileno(f), mime, sizeof mime) < 0)
+		hfail(Sinternal);
 	clen = fst->st_size;
-	if((s = lookuphdr(req->fields, "Range")) != nil){
+	if((s = lookuphdr(req, "Range")) != nil){
 		while(!isdigit(*++s) && *s != 0)
 			;
 		if(*s == 0)
@@ -573,26 +427,27 @@ sendfile(FILE *f, struct stat *fst)
 		else
 			brange[1] = strtoull(s, &s, 0);
 		if(brange[0] > brange[1] || brange[1] >= fst->st_size){
-			res = allocres(Snotrange);
-			snprintf(crstr, sizeof crstr, "bytes */%llu",
+			res = allocreq(nil, nil, nil, Snotrange);
+			snprint(crstr, sizeof crstr, "bytes */%llu",
 				fst->st_size);
 		}else{
-			res = allocres(Spartial);
+			res = allocreq(nil, nil, nil, Spartial);
 			fseeko(f, brange[0], SEEK_SET);
 			clen = brange[1]-brange[0]+1;
-			snprintf(crstr, sizeof crstr, "bytes %llu-%llu/%llu",
+			snprint(crstr, sizeof crstr, "bytes %llu-%llu/%llu",
 				brange[0], brange[1], fst->st_size);
 		}
-		inserthdr(&res->fields, "Content-Range", crstr);
+		inserthdr(res, "Content-Range", crstr);
 	}else
-		res = allocres(Sok);
-	inserthdr(&res->fields, "Accept-Ranges", "bytes");
-	inserthdr(&res->fields, "Content-Type", mime);
-	snprintf(clstr, sizeof clstr, "%llu", clen);
-	inserthdr(&res->fields, "Content-Length", clstr);
-	if((s = lookuphdr(req->fields, "Connection")) != nil)
-		inserthdr(&res->fields, "Connection", s);
-	hprinthdr();
+		res = allocreq(nil, nil, nil, Sok);
+	inserthdr(res, "Accept-Ranges", "bytes");
+	inserthdr(res, "Content-Type", mime);
+	snprint(clstr, sizeof clstr, "%llu", clen);
+	inserthdr(res, "Content-Length", clstr);
+	if((s = lookuphdr(req, "Connection")) != nil)
+		inserthdr(res, "Connection", s);
+	hprinthdr(res);
+	freereq(res);
 	if(strcmp(req->method, "HEAD") == 0)
 		return;
 	while(clen -= n, !feof(f) && clen > 0){
@@ -605,7 +460,7 @@ sendfile(FILE *f, struct stat *fst)
 }
 
 void
-sendlist(char *path)
+sendlist(Req *req, char *path)
 {
 	FILE *f;
 	struct stat fst;
@@ -616,7 +471,7 @@ sendlist(char *path)
 	dirlist = nil;
 	f = tmpfile();
 	if(f == nil)
-		hfatal("sendlist: tmpfile");
+		hfail(Sinternal);
 	filldirlist(path, &dirlist, &ndir);
 	qsort(dirlist, ndir, sizeof(char *), stringcmp);
 	fprintf(f, listhead);
@@ -632,14 +487,14 @@ sendlist(char *path)
 		switch(errno){
 		case EACCES: hfail(Sforbid);
 		case ENOENT: hfail(Snotfound);
-		default: hfatal("sendlist: fstat");
+		default: hfail(Sinternal);
 		}
-	sendfile(f, &fst);
+	sendfile(req, f, &fst);
 	fclose(f);
 }
 
 void
-sendportal(char *path)
+sendportal(Req *req, char *path)
 {
 	Resource r;
 	Part *p;
@@ -650,30 +505,35 @@ sendportal(char *path)
 	DIR *root, *d, *ed;
 	struct dirent *rdir, *dir, *edir;
 	char *title, *line, auxpath[512], buf[1024];
-	uint linelen;
+	ulong linelen;
 	int n, sno, canintrosubs, canintrodubs, canintroseason;
 
 	p = nil;
 	s = nil;
 	e = nil;
 	line = nil;
+	linelen = 0;
 	sno = 0;
+
 	memset(&r, 0, sizeof(Resource));
 	r.type = Runknown;
+
 	memset(auxpath, 0, sizeof auxpath);
+
 	title = strrchr(path, '/');
 	if(*++title == 0)
 		hfail(Sbadreq);
+
 	root = opendir(path);
 	if(root == nil)
-		hfatal("sendportal: opendir");
-	fprintf(stdout, "%s\n", getcwd(nil, 0));
+		hfail(Sinternal);
+
 	while((rdir = readdir(root)) != nil){
 		switch(r.type){
 		case Runknown: break;
 		case Rmovie:
 			if(strcmp(rdir->d_name, "release") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				f = fopen(auxpath, "r");
 				if(f == nil)
 					goto Rogue;
@@ -681,6 +541,8 @@ sendportal(char *path)
 				if(line[n-1] == '\n')
 					line[(n--)-1] = 0;
 				r.movie.release = strdup(line);
+				free(line);
+				line = nil;
 				fclose(f);
 			}else if(strcmp(rdir->d_name, "synopsis") == 0)
 				r.movie.hassynopsis++;
@@ -691,22 +553,22 @@ sendportal(char *path)
 			else if(strcmp(rdir->d_name, "history") == 0)
 				r.movie.hashistory++;
 			else if(strcmp(rdir->d_name, "sub") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.movie.subs, &r.movie.nsub);
 			}else if(strcmp(rdir->d_name, "dub") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.movie.dubs, &r.movie.ndub);
 			}else if(strcmp(rdir->d_name, "extra") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.movie.extras, &r.movie.nextra);
 			}else if(strcmp(rdir->d_name, "remake") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.movie.remakes, &r.movie.nremake);
 			}
 			continue;
 		case Rmulti:
 			if(strcmp(rdir->d_name, "release") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				f = fopen(auxpath, "r");
 				if(f == nil)
 					goto Rogue;
@@ -714,6 +576,8 @@ sendportal(char *path)
 				if(line[n-1] == '\n')
 					line[(n--)-1] = 0;
 				r.multi.release = strdup(line);
+				free(line);
+				line = nil;
 				fclose(f);
 			}else if(strcmp(rdir->d_name, "synopsis") == 0)
 				r.multi.hassynopsis++;
@@ -730,15 +594,15 @@ sendportal(char *path)
 					p = p->next;
 				}
 				p->no = strtol(rdir->d_name+5, nil, 0);
-				snprintf(auxpath, sizeof auxpath, "%s/sub%d", path, p->no);
+				snprint(auxpath, sizeof auxpath, "%s/sub%d", path, p->no);
 				filldirlist(auxpath, &p->subs, &p->nsub);
-				snprintf(auxpath, sizeof auxpath, "%s/dub%d", path, p->no);
+				snprint(auxpath, sizeof auxpath, "%s/dub%d", path, p->no);
 				filldirlist(auxpath, &p->dubs, &p->ndub);
 			}else if(strcmp(rdir->d_name, "extra") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.multi.extras, &r.multi.nextra);
 			}else if(strcmp(rdir->d_name, "remake") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.multi.remakes, &r.multi.nremake);
 			}
 			continue;
@@ -750,7 +614,7 @@ sendportal(char *path)
 			else if(strcmp(rdir->d_name, "history") == 0)
 				r.serie.hashistory++;
 			else if(strcmp(rdir->d_name, "release") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				f = fopen(auxpath, "r");
 				if(f == nil)
 					goto Rogue;
@@ -768,9 +632,11 @@ sendportal(char *path)
 						s = s->next;
 					}
 					s->release = strdup(line);
+					free(line);
+					line = nil;
 					s->no = sno;
 					e = nil;
-					snprintf(auxpath, sizeof auxpath, "%s/s/%d", path, s->no);
+					snprint(auxpath, sizeof auxpath, "%s/s/%d", path, s->no);
 					d = opendir(auxpath);
 					if(d == nil)
 						goto Rogue;
@@ -785,7 +651,7 @@ sendportal(char *path)
 						 * handle ranged episode folders, like `s/1/1-2' in
 						 * Battlestar Galactica. or perhaps split the episode.
 						 */
-						snprintf(auxpath, sizeof auxpath, "%s/s/%d/%s", path, s->no, dir->d_name);
+						snprint(auxpath, sizeof auxpath, "%s/s/%d/%s", path, s->no, dir->d_name);
 						ed = opendir(auxpath);
 						if(ed == nil)
 							goto Rogue;
@@ -793,10 +659,10 @@ sendportal(char *path)
 							if(strcmp(edir->d_name, "video") == 0)
 								e->hasvideo++;
 							else if(strcmp(edir->d_name, "sub") == 0){
-								snprintf(auxpath, sizeof auxpath, "%s/s/%d/%d/%s", path, s->no, e->no, edir->d_name);
+								snprint(auxpath, sizeof auxpath, "%s/s/%d/%d/%s", path, s->no, e->no, edir->d_name);
 								filldirlist(auxpath, &e->subs, &e->nsub);
 							}else if(strcmp(edir->d_name, "dub") == 0){
-								snprintf(auxpath, sizeof auxpath, "%s/s/%d/%d/%s", path, s->no, e->no, edir->d_name);
+								snprint(auxpath, sizeof auxpath, "%s/s/%d/%d/%s", path, s->no, e->no, edir->d_name);
 								filldirlist(auxpath, &e->dubs, &e->ndub);
 							}
 						}
@@ -806,10 +672,10 @@ sendportal(char *path)
 				}
 				fclose(f);
 			}else if(strcmp(rdir->d_name, "extra") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.serie.extras, &r.serie.nextra);
 			}else if(strcmp(rdir->d_name, "remake") == 0){
-				snprintf(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
+				snprint(auxpath, sizeof auxpath, "%s/%s", path, rdir->d_name);
 				filldirlist(auxpath, &r.serie.remakes, &r.serie.nremake);
 			}
 			continue;
@@ -826,13 +692,14 @@ sendportal(char *path)
 	closedir(root);
 	if(r.type == Runknown){
 Rogue:
-		sendlist(path);
+		sendlist(req, path);
 		exit(0);
 	}
-	fprintf(stderr, "tmpfile incoming\n");
 	f = tmpfile();
 	if(f == nil)
-		hfatal("sendportal: tmpfile");
+		hfail(Sinternal);
+	if(debug)
+		fprint(2, "tmpfile set up\n");
 	fprintf(f, portalhead, title, title);
 	switch(r.type){
 	case Rmovie:
@@ -843,7 +710,7 @@ Rogue:
 		fprintf(f, portalmoviestream, req->target);
 		if(r.movie.hassynopsis){
 			fprintf(f, portalsynopsis);
-			snprintf(auxpath, sizeof auxpath, "%s/synopsis", path);
+			snprint(auxpath, sizeof auxpath, "%s/synopsis", path);
 			auxf = fopen(auxpath, "r");
 			if(auxf == nil)
 				break;
@@ -858,7 +725,7 @@ Rogue:
 		}
 		if(r.movie.hashistory){
 			fprintf(f, portalhistory);
-			snprintf(auxpath, sizeof auxpath, "%s/history", path);
+			snprint(auxpath, sizeof auxpath, "%s/history", path);
 			auxf = fopen(auxpath, "r");
 			if(auxf == nil)
 				break;
@@ -905,7 +772,7 @@ Rogue:
 		fprintf(f, "</ul>");
 		if(r.multi.hassynopsis){
 			fprintf(f, portalsynopsis);
-			snprintf(auxpath, sizeof auxpath, "%s/synopsis", path);
+			snprint(auxpath, sizeof auxpath, "%s/synopsis", path);
 			auxf = fopen(auxpath, "r");
 			if(auxf == nil)
 				break;
@@ -920,7 +787,7 @@ Rogue:
 		}
 		if(r.multi.hashistory){
 			fprintf(f, portalhistory);
-			snprintf(auxpath, sizeof auxpath, "%s/history", path);
+			snprint(auxpath, sizeof auxpath, "%s/history", path);
 			auxf = fopen(auxpath, "r");
 			if(auxf == nil)
 				break;
@@ -986,7 +853,7 @@ Rogue:
 		fprintf(f, "</ul>");
 		if(r.serie.hassynopsis){
 			fprintf(f, portalsynopsis);
-			snprintf(auxpath, sizeof auxpath, "%s/synopsis", path);
+			snprint(auxpath, sizeof auxpath, "%s/synopsis", path);
 			auxf = fopen(auxpath, "r");
 			if(auxf == nil)
 				break;
@@ -1001,7 +868,7 @@ Rogue:
 		}
 		if(r.serie.hashistory){
 			fprintf(f, portalhistory);
-			snprintf(auxpath, sizeof auxpath, "%s/history", path);
+			snprint(auxpath, sizeof auxpath, "%s/history", path);
 			auxf = fopen(auxpath, "r");
 			if(auxf == nil)
 				break;
@@ -1065,65 +932,164 @@ Rogue:
 		switch(errno){
 		case EACCES: hfail(Sforbid);
 		case ENOENT: hfail(Snotfound);
-		default: hfatal("sendportal: fstat");
+		default: hfail(Sinternal);
 		}
-	sendfile(f, &fst);
+	sendfile(req, f, &fst);
 	fclose(f);
 }
 
-char *argv0;
+void
+srvfilms(void)
+{
+	Req *req;
+	FILE *f;
+	struct stat fst;
+	char path[512];
+
+	memset(path, 0, sizeof path);
+
+	req = hparsereq();
+	if(debug)
+		fprint(2, "received:\n\tmethod: %s\n\ttarget: %s\n\tversion: %s\n",
+			req->method, req->target, req->version);
+
+	if(strcmp(req->method, "GET") != 0 && strcmp(req->method, "HEAD") != 0)
+		hfail(Snotimple);
+	/* "HTTP/1." */
+	if(strncmp(req->version, httpver, 7) != 0)
+		hfail(Swrongver);
+
+	if(strcmp(req->target, "/style") == 0)
+		snprint(path, sizeof path, "%s/%s", assetpath, "style.css");
+	else if(strcmp(req->target, "/favicon.ico") == 0)
+		snprint(path, sizeof path, "%s/%s", assetpath, "favicon.ico");
+	else
+		snprint(path, sizeof path, "%s%s", wdir, req->target);
+
+	if(urldecode(path, path, strlen(path)) < 0)
+		hfail(Sbadreq);
+	if(debug)
+		fprint(2, "localtarget: %s\n", path);
+
+	if(stat(path, &fst) < 0)
+		switch(errno){
+		case EACCES: hfail(Sforbid);
+		case ENOENT: hfail(Snotfound);
+		default: hfail(Sinternal);
+		}
+
+	if(S_ISREG(fst.st_mode)){
+		f = fopen(path, "r");
+		if(f == nil)
+			hfail(Sinternal);
+		sendfile(req, f, &fst);
+		fclose(f);
+	}else
+		sendportal(req, path);
+	freereq(req);
+}
+
+void *
+tmain(void *a)
+{
+	char caddr[128];
+	int cfd;
+
+	for(;;){
+		pthread_mutex_lock(&attendlock);
+		if((cfd = acceptcall(lfd, caddr, sizeof caddr)) < 0)
+			sysfatal("acceptcall: %r");
+		pthread_mutex_unlock(&attendlock);
+		if(debug)
+			fprint(2, "thr#%lu accepted call from %s\n", pthread_self(), caddr);
+
+		switch(fork()){
+		case 0:
+			dup2(cfd, 0);
+			dup2(cfd, 1);
+			close(cfd);
+			srvfilms();
+			exit(0);
+		default:
+			//wait(nil);
+			/* FALLTHROUGH */
+		case -1:
+			break;
+		}
+
+		close(cfd);
+		if(debug)
+			fprint(2, "thr#%lu ended call with %s\n", pthread_self(), caddr);
+	}
+}
 
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-d wdir] [-a assetsdir]\n", argv0);
+	fprint(2, "usage: %s [-D] [-d wdir] [-a assetsdir] [-p port] [-u user] [-g group]\n", argv0);
 	exit(1);
 }
 
 int
 main(int argc, char *argv[])
 {
-	FILE *f;
-	struct stat fst;
-	char path[512];
+	int i, lport;
+	char *runusr;
+	struct passwd *pwd;
 
+	lport = 8080;
+	runusr = nil;
 	ARGBEGIN{
-	case 'd':
-		wdir = EARGF(usage());
-		break;
 	case 'a':
 		assetpath = EARGF(usage());
 		break;
+	case 'd':
+		wdir = EARGF(usage());
+		break;
+	case 'p':
+		lport = strtol(EARGF(usage()), nil, 10);
+		break;
+	case 'u':
+		runusr = EARGF(usage());
+		break;
+	case 'D':
+		debug++;
+		break;
 	default: usage();
 	}ARGEND;
-	memset(path, 0, sizeof path);
-	hparsereq();
-	if(strcmp(req->method, "GET") != 0 && strcmp(req->method, "HEAD") != 0)
-		hfail(Snotimple);
-	/* "HTTP/1." */
-	if(strncmp(req->version, httpver, 7) != 0)
-		hfail(Swrongver);
-	if(strcmp(req->target, "/style") == 0)
-		snprintf(path, sizeof path, "%s/%s", assetpath, "style.css");
-	else if(strcmp(req->target, "/favicon.ico") == 0)
-		snprintf(path, sizeof path, "%s/%s", assetpath, "favicon.ico");
-	else
-		snprintf(path, sizeof path, "%s%s", wdir, req->target);
-	if(urldecode(path, path, strlen(path)) < 0)
-		hfail(Sbadreq);
-	if(stat(path, &fst) < 0)
-		switch(errno){
-		case EACCES: hfail(Sforbid);
-		case ENOENT: hfail(Snotfound);
-		default: hfatal("stat");
-		}
-	if(S_ISREG(fst.st_mode)){
-		f = fopen(path, "r");
-		if(f == nil)
-			hfatal("fopen");
-		sendfile(f, &fst);
-		fclose(f);
-	}else
-		sendportal(path);
+	if(argc != 0)
+		usage();
+
+	if((lfd = listentcp(lport)) < 0)
+		sysfatal("listen: %r");
+
+	if(runusr != nil){
+		pwd = getpwnam(runusr);
+		if(pwd == nil)
+			sysfatal("getpwnam: %r");
+		if(setgid(pwd->pw_gid) < 0)
+			sysfatal("setgid: %r");
+		if(setuid(pwd->pw_uid) < 0)
+			sysfatal("setuid: %r");
+	}
+
+	ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+	if(ncpu < 1)
+		ncpu = 1;
+
+	threads = emalloc(sizeof(pthread_t)*ncpu);
+	pthread_mutex_init(&attendlock, nil);
+
+	for(i = 0; i < ncpu; i++){
+		pthread_create(threads+i, nil, tmain, nil);
+		if(debug)
+			fprint(2, "created thr#%lu\n", *(threads+i));
+	}
+
+	pause();
+
+	free(threads);
+	pthread_mutex_destroy(&attendlock);
+
 	exit(0);
 }

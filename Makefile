@@ -1,17 +1,17 @@
 CC=cc
-CFLAGS=-Wall -Wno-missing-braces -Wno-parentheses -Wno-switch -Wno-pointer-to-int-cast -fno-diagnostics-color -ggdb -c -O2
-LDFLAGS=-static
+CFLAGS=-Wall -Wno-missing-braces -Wno-parentheses -Wno-switch -Wno-pointer-to-int-cast -fno-diagnostics-color -I/usr/local/include -ggdb -c -O2
+LDFLAGS=-static -L/usr/local/lib -pthread -lfmt -lutf
 O=o
 
 TARG=filmoteca
 OFILES=\
 	filmoteca.$O\
-
-LIBS=\
-	libutf/libutf.a\
+	util.$O\
 
 HFILES=\
-	libutf/utf.h\
+	dat.h\
+	fns.h\
+	args.h\
 
 .PHONY: all clean
 all: $(TARG)
