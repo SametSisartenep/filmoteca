@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <pwd.h>
+#include <signal.h>
 #include <pthread.h>
 #include <utf.h>
 #include <fmt.h>
@@ -1011,6 +1012,7 @@ tmain(void *a)
 			srvfilms();
 			exit(0);
 		default:
+			signal(SIGCHLD, SIG_IGN);
 			//wait(nil);
 			/* FALLTHROUGH */
 		case -1:
