@@ -1,0 +1,29 @@
+body {
+	background-color: #ffffea;
+	color: black;
+	font-family: sans-serif;
+}
+::selection { background: #eeee9e; }
+h1 { text-align: center; }
+a {
+	color: black;
+	text-decoration: none;
+	font-size: 2em;
+}
+img#cover {
+	width: 348px;
+	height: 512px;
+	border: 4px solid #99994c;
+}
+table, th, td {
+	border: 2px solid #8888cc;
+	border-collapse: collapse;
+	background-color: #eaffff;
+}
+table ::selection { background: #9eeeee; }
+td { padding: .5em; }
+td:first-child { font-weight: bold; }
+td a {
+	text-decoration: underline dotted;
+	font-size: 1em;
+}

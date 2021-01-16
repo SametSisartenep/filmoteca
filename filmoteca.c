@@ -100,10 +100,22 @@ char *wdir = "/filmoteca";
 int lfd, ncpu;
 pthread_t *threads;
 pthread_mutex_t attendlock;
+Index catalog;
 
 int debug;
 char *argv0;
 
+
+uint
+hash(char *s)
+{
+	uint h;
+
+	h = 0x811c9dc5;
+	while(*s != 0)
+		h = (h*0x1000193) ^ (uchar)*s++;
+	return h % INDEXSIZE;
+}
 
 long
 truestrlen(char *s)
@@ -400,6 +412,92 @@ hparsereq(void)
 	free(line);
 
 	return req;
+}
+
+Movie *
+allocmovie(){}
+
+void
+freemovie(Movie *m){}
+
+Multipart *
+allocmultipart(){}
+
+void
+freemultipart(Multipart *m){}
+
+Series *
+allocserie(){}
+
+void
+freeserie(Series *s){}
+
+Resource *
+allocresource(char *title, int type, void *p)
+{
+	Resource *r;
+
+	r = emalloc(sizeof(Resource));
+	r->title = strdup(title);
+	r->type = type;
+	r->media = p;
+	r->next = nil;
+}
+
+void
+freeresource(Resource *r)
+{
+	free(r->title);
+	switch(r->type){
+	case Rmovie:
+		freemovie(r->media);
+		break;
+	case Rmulti:
+		freemultipart(r->media);
+		break;
+	case Rserie:
+		freeserie(r->media);
+		break;
+	}
+	free(r);
+}
+
+void
+addresource(Index *idx, Resource *r)
+{
+	Resource *rp;
+	uint h;
+
+	h = hash(r->title);
+	if(idx->rtab[h] == nil){
+		idx->rtab[h] = r;
+		return;
+	}
+	for(rp = idx->rtab[h]; rp->next != nil; rp = rp->next)
+		;
+	rp->next = r;
+}
+
+void
+delresource(Index *idx, char *title)
+{
+	Resource *rp, *rn;
+	uint h;
+
+	h = hash(title);
+	if(strcmp(idx->rtab[h]->title, title) == 0){
+		rn = idx->rtab[h]->next;
+		freeresource(idx->rtab[h]);
+		idx->rtab[h] = rn;
+		return;
+	}
+	for(rp = idx->rtab[h]; rp->next != nil; rp = rp->next)
+		if(strcmp(rp->next->title, title) == 0){
+			rn = rp->next->next;
+			freeresource(rp->next);
+			rp->next = rn;
+			break;
+		}
 }
 
 void

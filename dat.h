@@ -16,6 +16,7 @@ typedef struct Series Series;
 typedef struct Season Season;
 typedef struct Episode Episode;
 typedef struct Resource Resource;
+typedef struct Index Index;
 
 struct Movie {
 	char *release;		/* release date */
@@ -89,12 +90,24 @@ enum {
 	Runknown
 };
 struct Resource {
+	char *title;
 	int type;
+	void *media;
+	/* this union will disappear soon */
 	union {
 		Movie movie;
 		Multipart multi;
 		Series serie;
 	};
+	Resource *next;
+};
+
+enum {
+	INDEXSIZE	= 67,
+};
+struct Index {
+	pthread_rwlock_t lock;
+	Resource *rtab[INDEXSIZE];
 };
 
 typedef struct Req Req;
