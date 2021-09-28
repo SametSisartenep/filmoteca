@@ -8,6 +8,7 @@ typedef unsigned long long uvlong;
 typedef uint32_t u32int;
 typedef struct sockaddr sockaddr;
 typedef struct sockaddr_in sockaddr_in;
+typedef struct dirent dirent;
 
 typedef struct Movie Movie;
 typedef struct Multipart Multipart;

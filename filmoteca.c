@@ -48,12 +48,14 @@ char httpver[] = "HTTP/1.1";
 char srvname[] = "filmoteca";
 char errmsg[] = "NO MOVIES HERE";
 char listhead[] = "<!doctype html>\n<html>\n<head>\n"
+	"<meta charset=\"utf-8\">\n"
 	"<link rel=\"stylesheet\" href=\"/style\" media=\"all\" type=\"text/css\"/>\n"
 	"<title>Filmoteca</title>\n"
 	"</head>\n<body>\n"
 	"<h1>Filmoteca</h1>\n";
 char listfeet[] = "</body>\n</html>\n";
 char portalhead[] = "<!doctype html>\n<html>\n<head>\n"
+	"<meta charset=\"utf-8\">\n"
 	"<link rel=\"stylesheet\" href=\"/style\" media=\"all\" type=\"text/css\"/>\n"
 	"<title>Filmoteca - %s</title>\n"
 	"</head>\n<body>\n<center>\n"
@@ -415,22 +417,40 @@ hparsereq(void)
 }
 
 Movie *
-allocmovie(){}
+allocmovie()
+{
+
+}
 
 void
-freemovie(Movie *m){}
+freemovie(Movie *m)
+{
+
+}
 
 Multipart *
-allocmultipart(){}
+allocmultipart()
+{
+
+}
 
 void
-freemultipart(Multipart *m){}
+freemultipart(Multipart *m)
+{
+
+}
 
 Series *
-allocserie(){}
+allocserie()
+{
+
+}
 
 void
-freeserie(Series *s){}
+freeserie(Series *s)
+{
+
+}
 
 Resource *
 allocresource(char *title, int type, void *p)
@@ -498,6 +518,60 @@ delresource(Index *idx, char *title)
 			rp->next = rn;
 			break;
 		}
+}
+
+void
+initindex(Index *idx)
+{
+	Resource *r;
+	Movie *m;
+	Multipart *mp;
+	Series *s;
+	DIR *dp;
+	dirent *dpe;
+	char **dirs, *d, path[512];
+	int ndirs, rtype;
+
+	dirs = nil;
+	ndirs = 0;
+
+	filldirlist(wdir, &dirs, &ndirs);
+	while(ndirs > 0){
+		rtype = Runknown;
+		d = dirs[--ndirs];
+		snprint(path, sizeof path, "%s/%s", wdir, d);
+		dp = opendir(path);
+		while((dpe = readdir(dp)) != nil)
+			if(strcmp(dpe->d_name, "video") == 0){
+				rtype = Rmovie;
+				break;
+			}else if(strcmp(dpe->d_name, "video1") == 0){
+				rtype = Rmulti;
+				break;
+			}else if(strcmp(dpe->d_name, "s") == 0){
+				rtype = Rserie;
+				break;
+			}
+		if(rtype != Runknown)
+			rewinddir(dp);
+		else{
+			closedir(dp);
+			free(d);
+			continue;
+		}
+		switch(rtype){
+		case Rmovie:
+			m = allocmovie();
+			break;
+		case Rmulti:
+			mp = allocmultipart();
+			break;
+		case Rserie:
+			s = allocserie();
+			break;
+		}
+		free(d);
+	}
 }
 
 void
@@ -1167,6 +1241,9 @@ main(int argc, char *argv[])
 		pwd = getpwnam(runusr);
 		if(pwd == nil)
 			sysfatal("getpwnam: %r");
+		/* good practice */
+		if(setgroups(0, nil) < 0)
+			sysfatal("setgroups: %r");
 		if(setgid(pwd->pw_gid) < 0)
 			sysfatal("setgid: %r");
 		if(setuid(pwd->pw_uid) < 0)
