@@ -489,13 +489,8 @@ addresource(Index *idx, Resource *r)
 	uint h;
 
 	h = hash(r->title);
-	if(idx->rtab[h] == nil){
-		idx->rtab[h] = r;
-		return;
-	}
-	for(rp = idx->rtab[h]; rp->next != nil; rp = rp->next)
-		;
-	rp->next = r;
+	r->next = idx->rtab[h];
+	idx->rtab[h] = r;
 }
 
 void
@@ -527,6 +522,7 @@ initindex(Index *idx)
 	Movie *m;
 	Multipart *mp;
 	Series *s;
+	void *media;
 	DIR *dp;
 	dirent *dpe;
 	char **dirs, *d, path[512];
@@ -539,8 +535,10 @@ initindex(Index *idx)
 	while(ndirs > 0){
 		rtype = Runknown;
 		d = dirs[--ndirs];
+
 		snprint(path, sizeof path, "%s/%s", wdir, d);
 		dp = opendir(path);
+
 		while((dpe = readdir(dp)) != nil)
 			if(strcmp(dpe->d_name, "video") == 0){
 				rtype = Rmovie;
@@ -552,6 +550,7 @@ initindex(Index *idx)
 				rtype = Rserie;
 				break;
 			}
+
 		if(rtype != Runknown)
 			rewinddir(dp);
 		else{
@@ -559,17 +558,25 @@ initindex(Index *idx)
 			free(d);
 			continue;
 		}
+
 		switch(rtype){
 		case Rmovie:
 			m = allocmovie();
+			media = m;
 			break;
 		case Rmulti:
 			mp = allocmultipart();
+			media = mp;
 			break;
 		case Rserie:
 			s = allocserie();
+			media = s;
 			break;
 		}
+
+		r = allocresource(d, rtype, media);
+		addresource(idx, r);
+
 		free(d);
 	}
 }
